@@ -74,8 +74,14 @@ jobs:
           echo "=== OCID BYTES (first 60 hex) ==="
           echo -n "${OCI_TENANCY}" | od -A x -t x1z | head -6
           echo ""
-          echo "=== OCID VALIDATION: direct API call ==="
+          echo "=== TEST 1: compartment get (path param) ==="
           oci iam compartment get --compartment-id "${OCI_TENANCY}" 2>&1 || true
+          echo ""
+          echo "=== TEST 2: compartment list (query param, same as AD list) ==="
+          oci iam compartment list --compartment-id "${OCI_TENANCY}" --limit 1 2>&1 || true
+          echo ""
+          echo "=== TEST 3: availability-domain list ==="
+          oci iam availability-domain list --compartment-id "${OCI_TENANCY}" 2>&1 || true
           echo ""
           echo "======================================="
           echo ""
