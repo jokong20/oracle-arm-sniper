@@ -35,38 +35,43 @@ jobs:
           set -e
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
-          # ---- 写入 OCI 配置文件 ----
+          # 写入 OCI 配置文件
           mkdir -p $HOME/.oci
-          cat > $HOME/.oci/config <<OCICFG
+          cat > $HOME/.oci/config <<'OCICFG'
           [DEFAULT]
-          user=${OCI_USER}
-          fingerprint=${OCI_FP}
-          tenancy=${OCI_TENCANCY}
-          region=${OCI_REGION}
-          key_file=${HOME}/.oci/key.pem
+          user=PLACEHOLDER_USER
+          fingerprint=PLACEHOLDER_FP
+          tenancy=PLACEHOLDER_TENANCY
+          region=PLACEHOLDER_REGION
+          key_file=PLACEHOLDER_HOME/.oci/key.pem
           OCICFG
+          sed -i "s|PLACEHOLDER_USER|${OCI_USER}|" $HOME/.oci/config
+          sed -i "s|PLACEHOLDER_FP|${OCI_FP}|" $HOME/.oci/config
+          sed -i "s|PLACEHOLDER_TENANCY|${OCI_TENCANCY}|" $HOME/.oci/config
+          sed -i "s|PLACEHOLDER_REGION|${OCI_REGION}|" $HOME/.oci/config
+          sed -i "s|PLACEHOLDER_HOME|${HOME}|" $HOME/.oci/config
           echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
           chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
 
-          # ---- 调试：打印配置文件内容（隐藏密钥）----
-          echo "=== 调试：OCI 配置文件内容 ==="
+          # 调试：打印配置文件内容
+          echo "=== OCI Config File ==="
           grep -v "key_file" $HOME/.oci/config
-          echo "[tenancy 长度: $(echo -n "${OCI_TENCANCY}" | wc -c)]"
-          echo "[tenancy 前16字符: ${OCI_TENCANCY:0:16}]"
-          echo "============================="
+          echo "[tenancy length: $(echo -n "${OCI_TENCANCY}" | wc -c)]"
+          echo "[tenancy prefix: ${OCI_TENCANCY:0:16}]"
+          echo "======================="
           echo ""
 
-          # ---- 校验 tenancy 格式 ----
+          # 校验 tenancy 格式
           case "${OCI_TENCANCY}" in
             ocid1.tenancy.*) ;;
-            *) echo "[FATAL] TENANCY_OCID 不是合法的租户 OCID, 以 ocid1.tenancy. 开头"; exit 1 ;;
+            *) echo "[FATAL] TENANCY_OCID 不是合法的租户 OCID"; exit 1 ;;
           esac
 
-          # ---- SSH 配置 ----
+          # SSH
           mkdir -p $HOME/.ssh
           echo "${SSH_PUB_KEY}" > $HOME/.ssh/id_rsa_oracle.pub
 
-          # ---- 主逻辑 ----
+          # 主逻辑
           START_TIME=$(date +%s)
           MAX_RUNTIME=2700
 
@@ -89,7 +94,6 @@ jobs:
           echo "[CONFIG] 2C 12G ARM / 140G 存储"
           echo ""
 
-          # 检查是否已有 SNIPER 实例
           EXISTING=$(oci compute instance list \
             --compartment-id "${OCI_TENCANCY}" \
             --lifecycle-state RUNNING,PROVISIONING \
