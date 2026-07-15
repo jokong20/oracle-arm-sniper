@@ -137,11 +137,9 @@ jobs:
           START_TIME=$(date +%s)
           MAX_RUNTIME=2700
 
-          # Keep each AD request idempotent. If OCI accepts a launch but the CLI
-          # times out before receiving the response, the next retry must not
-          # create a duplicate instance.
-          declare -A RETRY_TOKENS
-          declare -A DISPLAY_NAMES
+          # Keep the display name stable during this run. This makes it easier
+          # to identify a request whose response was lost after a timeout.
+          DISPLAY_NAME="SNIPER-$(date +%m%d_%H%M%S)"
 
           while true; do
             ELAPSED=$(( $(date +%s) - START_TIME ))
@@ -151,11 +149,6 @@ jobs:
             fi
 
             for ad in "${AD_LIST[@]}"; do
-              if [[ -z "${RETRY_TOKENS[$ad]:-}" ]]; then
-                RETRY_TOKENS["$ad"]=$(cat /proc/sys/kernel/random/uuid)
-                DISPLAY_NAMES["$ad"]="SNIPER-$(date +%m%d_%H%M%S)"
-              fi
-
               echo "[TRY] $ad | elapsed ${ELAPSED}s"
               ERROR_FILE=$(mktemp)
               set +e
@@ -169,8 +162,7 @@ jobs:
                 --subnet-id "$SUBNET_ID" \
                 --ssh-authorized-keys-file "$HOME/.ssh/id_rsa_oracle.pub" \
                 --assign-public-ip true \
-                --display-name "${DISPLAY_NAMES[$ad]}" \
-                --opc-retry-token "${RETRY_TOKENS[$ad]}" \
+                --display-name "$DISPLAY_NAME" \
                 --output json 2>"$ERROR_FILE")
               RC=$?
               set -e
@@ -189,6 +181,11 @@ jobs:
 
               ERROR_TEXT=$(tr '\n' ' ' < "$ERROR_FILE")
               rm -f "$ERROR_FILE"
+              # Some OCI CLI usage errors are printed to stdout. Preserve them
+              # when stderr is empty so failures are diagnosable.
+              if [[ -z "$ERROR_TEXT" && -n "$LAUNCH_JSON" ]]; then
+                ERROR_TEXT=$(printf '%s' "$LAUNCH_JSON" | tr '\n' ' ')
+              fi
               if grep -Eqi 'out[ -]of[ -](host )?capacity|OutOfHostCapacity' <<< "$ERROR_TEXT"; then
                 echo "[RETRY] $ad has no available capacity."
               elif grep -Eqi 'too many requests|TooManyRequests|service unavailable|ServiceUnavailable|RequestException|connection .*timed out|read timed out|connect timeout|connection (reset|aborted|refused)|remote end closed|network is unreachable|temporary failure|name or service not known|could not resolve' <<< "$ERROR_TEXT"; then
