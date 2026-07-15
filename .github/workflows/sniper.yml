@@ -1,4 +1,4 @@
-name: Oracle ARM Instance Sniper Template
+name: Oracle ARM Instance Sniper
 on:
   workflow_dispatch:
   schedule:
@@ -22,7 +22,7 @@ jobs:
     steps:
       - name: Install OCI CLI
         run: |
-          curl -L -O [https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh](https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh)
+          curl -L -O https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh
           chmod +x install.sh
           ./install.sh --accept-all-defaults
           echo "/home/runner/bin" >> $GITHUB_PATH
@@ -33,48 +33,74 @@ jobs:
           OCI_FP: ${{ secrets.FINGERPRINT }}
           OCI_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.oci
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${OCI_USER}
-          fingerprint=${OCI_FP}
-          tenancy=${OCI_TENANCY}
-          region=${OCI_REGION}
-          key_file=~/.oci/key.pem
-          EOF
-          echo "${OCI_PRIVATE_KEY}" > ~/.oci/key.pem
-          chmod 600 ~/.oci/key.pem ~/.oci/config
+          mkdir -p $HOME/.oci
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s/.oci/key.pem\n' \
+            "$OCI_USER" "$OCI_FP" "$OCI_TENCANCY" "$OCI_REGION" "$HOME" \
+            > $HOME/.oci/config
+          echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
+          chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
 
-      - name: Fixed-Key Sentry Loop
+      - name: Oracle ARM Sniper Loop
         run: |
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
           START_TIME=$(date +%s)
-          
+          MAX_RUNTIME=2700  # 45 分钟
+
           mkdir -p ~/.ssh
           echo "${SSH_PUB_KEY}" > ~/.ssh/id_rsa_oracle.pub
-          
-          AD_LIST=$(oci iam availability-domain list --compartment-id "${OCI_TENANCY}" --query "data[*].name" --raw-output | jq -r '.[]' | sort)
-          IMAGE_ID=$(oci compute image list --compartment-id "${OCI_TENANCY}" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" --query 'data[0].id' --raw-output)
-          
-          echo "=== Oracle ARM Sniper Template V1.0 ==="
-          echo "[AD] Target ADs: $(echo $AD_LIST | tr '\n' ' ')"
-          echo "[IMG] Target Image: ${IMAGE_ID}"
-          
+
+          # 获取所有可用域
+          AD_LIST=$(oci iam availability-domain list \
+            --compartment-id "${OCI_TENCANCY}" \
+            --query "data[*].name" \
+            --raw-output | jq -r '.[]' | sort)
+
+          # 获取 Ubuntu 24.04 镜像 ID
+          IMAGE_ID=$(oci compute image list \
+            --compartment-id "${OCI_TENCANCY}" \
+            --operating-system "Canonical Ubuntu" \
+            --operating-system-version "24.04" \
+            --shape "VM.Standard.A1.Flex" \
+            --query 'data[0].id' \
+            --raw-output)
+
+          echo "=== Oracle ARM Sniper ==="
+          echo "[AD] 可用域: $(echo $AD_LIST | tr '\n' ' ')"
+          echo "[IMG] 镜像 ID: ${IMAGE_ID}"
+          echo "[CONFIG] 2C 12G ARM / 140G 存储"
+          echo ""
+
+          # 先检查是否已有 SNIPER 实例（含 RUNNING 和 PROVISIONING 状态），避免重复创建
+          EXISTING=$(oci compute instance list \
+            --compartment-id "${OCI_TENCANCY}" \
+            --lifecycle-state RUNNING,PROVISIONING \
+            --query "data[].\"display-name\"" \
+            --raw-output 2>/dev/null | grep -c "SNIPER-" || echo "0")
+
+          if [ "${EXISTING}" != "0" ] && [ "${EXISTING}" != "" ]; then
+            echo "[SKIP] 已有 SNIPER 实例存在中，跳过本轮"
+            exit 0
+          fi
+
           while true; do
             CURRENT_TIME=$(date +%s)
             ELAPSED=$(( CURRENT_TIME - START_TIME ))
-            
-            if [ $ELAPSED -gt 2700 ]; then
-              echo "[TIMEOUT] Reached 45m limit. Exiting safely."
+
+            if [ $ELAPSED -gt $MAX_RUNTIME ]; then
+              echo "[TIMEOUT] 已运行 45 分钟，安全退出"
               exit 0
             fi
 
             for ad in $AD_LIST; do
-              echo "[TRY] $ad | Elapsed: ${ELAPSED}s"
-              
+              echo "[$(date +%H:%M:%S)] 尝试 $ad | 已运行 ${ELAPSED}s"
+
+              # 注意：移除了 --wait-for-state 参数
+              # 原因：带 --wait-for-state --max-wait-seconds 1 时，
+              # 实例虽已创建但未达 RUNNING 状态会导致返回非零，
+              # 脚本误判为"无货"而继续尝试，造成重复创建
               if oci compute instance launch \
                 --availability-domain "$ad" \
-                --compartment-id "${OCI_TENANCY}" \
+                --compartment-id "${OCI_TENCANCY}" \
                 --shape "VM.Standard.A1.Flex" \
                 --shape-config '{"ocpus":2,"memoryInGBs":12}' \
                 --boot-volume-size-in-gbs 140 \
@@ -83,16 +109,45 @@ jobs:
                 --ssh-authorized-keys-file ~/.ssh/id_rsa_oracle.pub \
                 --assign-public-ip true \
                 --display-name "SNIPER-$(date +%m%d_%H%M)" \
-                --wait-for-state RUNNING --max-wait-seconds 1 \
-                >/dev/null 2>/dev/null; then
-                
-                echo "[SUCCESS] ARM 4C24G instance created in $ad"
+                >/dev/null 2>&1; then
+
+                echo ""
+                echo "============================================"
+                echo "  [SUCCESS] ARM 2C12G / 140G 实例创建成功！"
+                echo "  可用域: $ad"
+                echo "  时间: $(date)"
+                echo "============================================"
+                echo ""
+
+                # 获取最近创建的实例信息（按创建时间倒序取最新一条）
+                sleep 15
+                INSTANCE_ID=$(oci compute instance list \
+                  --compartment-id "${OCI_TENCANCY}" \
+                  --lifecycle-state PROVISIONING,RUNNING \
+                  --sort-by TIMECREATED \
+                  --sort-order DESC \
+                  --limit 1 \
+                  --query "data[0].id" \
+                  --raw-output 2>/dev/null)
+
+                if [ -n "$INSTANCE_ID" ]; then
+                  echo "[INFO] 实例 ID: $INSTANCE_ID"
+                  PUBLIC_IP=$(oci compute instance list-vnics \
+                    --instance-id "$INSTANCE_ID" \
+                    --query "data[0].\"public-ip\"" \
+                    --raw-output 2>/dev/null)
+                  echo "[INFO] 公网 IP: $PUBLIC_IP"
+                  echo "[INFO] SSH 登录: ssh ubuntu@$PUBLIC_IP"
+                fi
+
                 exit 0
               else
-                echo "$ad: No stock"
+                echo "  $ad: 暂无资源"
               fi
-              
+
               sleep 5
             done
+
+            echo "[$(date +%H:%M:%S)] 本轮全部失败，30 秒后重试..."
             sleep 30
           done
