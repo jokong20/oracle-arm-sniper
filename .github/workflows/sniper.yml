@@ -38,13 +38,13 @@ jobs:
           # ---- 写入 OCI 配置文件 ----
           mkdir -p $HOME/.oci
           cat > $HOME/.oci/config <<OCICFG
-[DEFAULT]
-user=${OCI_USER}
-fingerprint=${OCI_FP}
-tenancy=${OCI_TENCANCY}
-region=${OCI_REGION}
-key_file=${HOME}/.oci/key.pem
-OCICFG
+          [DEFAULT]
+          user=${OCI_USER}
+          fingerprint=${OCI_FP}
+          tenancy=${OCI_TENCANCY}
+          region=${OCI_REGION}
+          key_file=${HOME}/.oci/key.pem
+          OCICFG
           echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
           chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
 
