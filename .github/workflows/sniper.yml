@@ -1,17 +1,22 @@
 name: Oracle ARM Instance Sniper
+
 on:
   workflow_dispatch:
   schedule:
     - cron: '*/15 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oracle-arm-sniper-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   sniper:
     name: ARM Instance Sniper
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    concurrency:
-      group: ${{ github.workflow }}
-      cancel-in-progress: false
 
     env:
       OCI_USER: ${{ secrets.USER_OCID }}
@@ -24,89 +29,163 @@ jobs:
 
     steps:
       - name: Install OCI CLI
+        shell: bash
         run: |
-          curl -L -O https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh
-          chmod +x install.sh
-          ./install.sh --accept-all-defaults
-          echo "/home/runner/bin" >> $GITHUB_PATH
+          set -euo pipefail
+          curl --fail --location --silent --show-error \
+            --output install-oci-cli.sh \
+            https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh
+          chmod +x install-oci-cli.sh
+          ./install-oci-cli.sh --accept-all-defaults
+          echo "$HOME/bin" >> "$GITHUB_PATH"
 
-      - name: Oracle ARM Sniper
+      - name: Launch ARM instance
+        shell: bash
         run: |
-          set -e
+          set -Eeuo pipefail
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
-          # 校验关键环境变量
-          if [ -z "${OCI_TENANCY}" ]; then echo "[FATAL] OCI_TENANCY is empty!"; exit 1; fi
-          if [ -z "${OCI_USER}" ]; then echo "[FATAL] OCI_USER is empty!"; exit 1; fi
+          # Do not print secret values. Lengths are safe diagnostics for missing Secrets.
+          echo '=== ENV DIAGNOSTICS ==='
+          for name in OCI_USER OCI_TENANCY OCI_REGION OCI_FP SUBNET_ID SSH_PUB_KEY OCI_PRIVATE_KEY; do
+            value="${!name:-}"
+            if [[ -n "$value" ]]; then
+              echo "$name: set (length ${#value})"
+            else
+              echo "$name: MISSING"
+            fi
+          done
+          echo '======================='
 
-          # 写入 OCI 配置
-          mkdir -p $HOME/.oci
-          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s/.oci/key.pem\n' \
-            "${OCI_USER}" "${OCI_FP}" "${OCI_TENANCY}" "${OCI_REGION}" "${HOME}" \
-            > $HOME/.oci/config
-          echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
-          chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
+          for name in OCI_USER OCI_TENANCY OCI_REGION OCI_FP OCI_PRIVATE_KEY SUBNET_ID SSH_PUB_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "[FATAL] Missing GitHub Secret for $name"
+              exit 1
+            fi
+          done
 
-          # SSH
-          mkdir -p $HOME/.ssh
-          echo "${SSH_PUB_KEY}" > $HOME/.ssh/id_rsa_oracle.pub
+          # GitHub multiline Secrets can contain CRLF line endings. Normalize only locally.
+          OCI_USER="${OCI_USER//$'\r'/}"
+          OCI_TENANCY="${OCI_TENANCY//$'\r'/}"
+          OCI_REGION="${OCI_REGION//$'\r'/}"
+          OCI_FP="${OCI_FP//$'\r'/}"
+          SUBNET_ID="${SUBNET_ID//$'\r'/}"
+          SSH_PUB_KEY="${SSH_PUB_KEY//$'\r'/}"
+          OCI_PRIVATE_KEY="${OCI_PRIVATE_KEY//$'\r'/}"
 
-          # 主逻辑：不用 --query，全部用 jq 提取字段
-          START_TIME=$(date +%s)
-          MAX_RUNTIME=2700
+          mkdir -p "$HOME/.oci" "$HOME/.ssh"
+          printf '%s\n' "$OCI_PRIVATE_KEY" > "$HOME/.oci/key.pem"
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s\n' \
+            "$OCI_USER" "$OCI_FP" "$OCI_TENANCY" "$OCI_REGION" "$HOME/.oci/key.pem" \
+            > "$HOME/.oci/config"
+          printf '%s\n' "$SSH_PUB_KEY" > "$HOME/.ssh/id_rsa_oracle.pub"
+          chmod 600 "$HOME/.oci/key.pem" "$HOME/.oci/config"
+          chmod 644 "$HOME/.ssh/id_rsa_oracle.pub"
 
-          echo "=== Oracle ARM Sniper ==="
+          # Fail early if a pasted key is malformed.
+          openssl pkey -in "$HOME/.oci/key.pem" -noout >/dev/null
+          ssh-keygen -lf "$HOME/.ssh/id_rsa_oracle.pub" >/dev/null
 
-          AD_LIST=$(oci iam availability-domain list --compartment-id "${OCI_TENCANCY}" | jq -r '.data[].name' | sort)
-          echo "[AD] $(echo $AD_LIST | tr '\n' ' ')"
+          echo '=== OCI AUTH CHECK ==='
+          oci iam availability-domain list \
+            --compartment-id "$OCI_TENANCY" \
+            --query 'data[].name' \
+            --output json > /tmp/ad.json
+          mapfile -t AD_LIST < <(jq -r '.[]' /tmp/ad.json)
+          if (( ${#AD_LIST[@]} == 0 )); then
+            echo '[FATAL] No availability domains were returned.'
+            exit 1
+          fi
+          printf '[AD] %s\n' "${AD_LIST[*]}"
 
-          IMAGE_ID=$(oci compute image list --compartment-id "${OCI_TENCANCY}" --operating-system "Canonical Ubuntu" --operating-system-version "24.04" --shape "VM.Standard.A1.Flex" | jq -r '.data[0].id')
-          echo "[IMG] ${IMAGE_ID}"
-          echo "[CONFIG] 2C 12G ARM / 140G 存储"
-          echo ""
+          # Use the latest matching Canonical Ubuntu 24.04 ARM image.
+          IMAGE_ID=$(oci compute image list \
+            --compartment-id "$OCI_TENANCY" \
+            --operating-system 'Canonical Ubuntu' \
+            --operating-system-version '24.04' \
+            --shape 'VM.Standard.A1.Flex' \
+            --sort-by TIMECREATED \
+            --sort-order DESC \
+            --query 'data[0].id' \
+            --raw-output)
+          if [[ -z "$IMAGE_ID" || "$IMAGE_ID" == 'null' ]]; then
+            echo '[FATAL] No Ubuntu 24.04 ARM image was found.'
+            exit 1
+          fi
+          echo '[IMG] Ubuntu 24.04 ARM image found.'
 
-          # 检查已有 SNIPER 实例
-          EXISTING=$(oci compute instance list --compartment-id "${OCI_TENCANCY}" --lifecycle-state RUNNING,PROVISIONING 2>/dev/null | jq -r '.data[]."display-name" // empty' | grep -c "SNIPER-" || echo "0")
-          if [ "${EXISTING}" != "0" ] && [ "${EXISTING}" != "" ]; then
-            echo "[SKIP] 已有 SNIPER 实例存在中，跳过本轮"
+          # Prevent a later scheduled run from creating a second SNIPER instance.
+          oci compute instance list \
+            --compartment-id "$OCI_TENANCY" \
+            --all \
+            --output json > /tmp/instances.json
+          EXISTING_ID=$(jq -r '
+            first(
+              .data[]
+              | select((."display-name" // "") | startswith("SNIPER-"))
+              | select((."lifecycle-state" // "") != "TERMINATED")
+              | select((."lifecycle-state" // "") != "TERMINATING")
+              | .id
+            ) // empty
+          ' /tmp/instances.json)
+          if [[ -n "$EXISTING_ID" && "$EXISTING_ID" != 'null' ]]; then
+            echo '[SKIP] A SNIPER instance already exists.'
+            echo "[INFO] Instance ID: $EXISTING_ID"
             exit 0
           fi
 
+          START_TIME=$(date +%s)
+          MAX_RUNTIME=2700
+
           while true; do
-            CURRENT_TIME=$(date +%s)
-            ELAPSED=$(( CURRENT_TIME - START_TIME ))
-            if [ $ELAPSED -gt $MAX_RUNTIME ]; then
-              echo "[TIMEOUT] 已运行 45 分钟，安全退出"
+            ELAPSED=$(( $(date +%s) - START_TIME ))
+            if (( ELAPSED >= MAX_RUNTIME )); then
+              echo '[TIMEOUT] Reached the 45-minute limit; exiting safely.'
               exit 0
             fi
 
-            for ad in $AD_LIST; do
-              echo "[$(date +%H:%M:%S)] 尝试 $ad | 已运行 ${ELAPSED}s"
+            for ad in "${AD_LIST[@]}"; do
+              echo "[TRY] $ad | elapsed ${ELAPSED}s"
+              ERROR_FILE=$(mktemp)
+              set +e
+              LAUNCH_JSON=$(oci compute instance launch \
+                --availability-domain "$ad" \
+                --compartment-id "$OCI_TENANCY" \
+                --shape 'VM.Standard.A1.Flex' \
+                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --boot-volume-size-in-gbs 140 \
+                --image-id "$IMAGE_ID" \
+                --subnet-id "$SUBNET_ID" \
+                --ssh-authorized-keys-file "$HOME/.ssh/id_rsa_oracle.pub" \
+                --assign-public-ip true \
+                --display-name "SNIPER-$(date +%m%d_%H%M%S)" \
+                --output json 2>"$ERROR_FILE")
+              RC=$?
+              set -e
 
-              if oci compute instance launch --availability-domain "$ad" --compartment-id "${OCI_TENCANCY}" --shape "VM.Standard.A1.Flex" --shape-config '{"ocpus":2,"memoryInGBs":12}' --boot-volume-size-in-gbs 140 --image-id "$IMAGE_ID" --subnet-id "${SUBNET_ID}" --ssh-authorized-keys-file $HOME/.ssh/id_rsa_oracle.pub --assign-public-ip true --display-name "SNIPER-$(date +%m%d_%H%M)" >/dev/null 2>&1; then
-
-                echo ""
-                echo "============================================"
-                echo "  [SUCCESS] ARM 2C12G / 140G 实例创建成功！"
-                echo "  可用域: $ad"
-                echo "  时间: $(date)"
-                echo "============================================"
-                echo ""
-
-                sleep 15
-                INSTANCE_ID=$(oci compute instance list --compartment-id "${OCI_TENCANCY}" --lifecycle-state PROVISIONING,RUNNING --sort-by TIMECREATED --sort-order DESC --limit 1 2>/dev/null | jq -r '.data[0].id // empty')
-                if [ -n "$INSTANCE_ID" ]; then
-                  echo "[INFO] 实例 ID: $INSTANCE_ID"
-                  PUBLIC_IP=$(oci compute instance list-vnics --instance-id "$INSTANCE_ID" 2>/dev/null | jq -r '.data[0]."public-ip" // empty')
-                  echo "[INFO] 公网 IP: $PUBLIC_IP"
-                  echo "[INFO] SSH 登录: ssh ubuntu@$PUBLIC_IP"
+              if (( RC == 0 )); then
+                INSTANCE_ID=$(printf '%s' "$LAUNCH_JSON" | jq -r '.data.id // empty')
+                if [[ -z "$INSTANCE_ID" ]]; then
+                  echo '[FATAL] Launch returned success but no instance ID.'
+                  exit 1
                 fi
+                echo "[SUCCESS] Instance launch accepted in $ad"
+                echo "[INFO] Instance ID: $INSTANCE_ID"
+                rm -f "$ERROR_FILE"
                 exit 0
+              fi
+
+              ERROR_TEXT=$(tr '\n' ' ' < "$ERROR_FILE")
+              rm -f "$ERROR_FILE"
+              if grep -Eqi 'out[ -]of[ -](host )?capacity|OutOfHostCapacity|too many requests|TooManyRequests|service unavailable' <<< "$ERROR_TEXT"; then
+                echo "[RETRY] $ad has no available capacity."
               else
-                echo "  $ad: 暂无资源"
+                echo "[FATAL] OCI launch failed: $ERROR_TEXT"
+                exit "$RC"
               fi
               sleep 5
             done
-            echo "[$(date +%H:%M:%S)] 本轮全部失败，30 秒后重试..."
+            echo '[RETRY] All availability domains failed; retrying in 30 seconds.'
             sleep 30
           done
+
