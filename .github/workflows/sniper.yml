@@ -33,17 +33,12 @@ jobs:
           OCI_FP: ${{ secrets.FINGERPRINT }}
           OCI_PRIVATE_KEY: ${{ secrets.PRIVATE_KEY }}
         run: |
-          mkdir -p ~/.oci
-          cat > ~/.oci/config <<EOF
-          [DEFAULT]
-          user=${OCI_USER}
-          fingerprint=${OCI_FP}
-          tenancy=${OCI_TENCANCY}
-          region=${OCI_REGION}
-          key_file=~/.oci/key.pem
-          EOF
-          echo "${OCI_PRIVATE_KEY}" > ~/.oci/key.pem
-          chmod 600 ~/.oci/key.pem ~/.oci/config
+          mkdir -p $HOME/.oci
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s/.oci/key.pem\n' \
+            "$OCI_USER" "$OCI_FP" "$OCI_TENCANCY" "$OCI_REGION" "$HOME" \
+            > $HOME/.oci/config
+          echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
+          chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
 
       - name: Oracle ARM Sniper Loop
         run: |
