@@ -137,6 +137,12 @@ jobs:
           START_TIME=$(date +%s)
           MAX_RUNTIME=2700
 
+          # Keep each AD request idempotent. If OCI accepts a launch but the CLI
+          # times out before receiving the response, the next retry must not
+          # create a duplicate instance.
+          declare -A RETRY_TOKENS
+          declare -A DISPLAY_NAMES
+
           while true; do
             ELAPSED=$(( $(date +%s) - START_TIME ))
             if (( ELAPSED >= MAX_RUNTIME )); then
@@ -145,6 +151,11 @@ jobs:
             fi
 
             for ad in "${AD_LIST[@]}"; do
+              if [[ -z "${RETRY_TOKENS[$ad]:-}" ]]; then
+                RETRY_TOKENS["$ad"]=$(cat /proc/sys/kernel/random/uuid)
+                DISPLAY_NAMES["$ad"]="SNIPER-$(date +%m%d_%H%M%S)"
+              fi
+
               echo "[TRY] $ad | elapsed ${ELAPSED}s"
               ERROR_FILE=$(mktemp)
               set +e
@@ -158,7 +169,8 @@ jobs:
                 --subnet-id "$SUBNET_ID" \
                 --ssh-authorized-keys-file "$HOME/.ssh/id_rsa_oracle.pub" \
                 --assign-public-ip true \
-                --display-name "SNIPER-$(date +%m%d_%H%M%S)" \
+                --display-name "${DISPLAY_NAMES[$ad]}" \
+                --opc-retry-token "${RETRY_TOKENS[$ad]}" \
                 --output json 2>"$ERROR_FILE")
               RC=$?
               set -e
@@ -177,8 +189,11 @@ jobs:
 
               ERROR_TEXT=$(tr '\n' ' ' < "$ERROR_FILE")
               rm -f "$ERROR_FILE"
-              if grep -Eqi 'out[ -]of[ -](host )?capacity|OutOfHostCapacity|too many requests|TooManyRequests|service unavailable' <<< "$ERROR_TEXT"; then
+              if grep -Eqi 'out[ -]of[ -](host )?capacity|OutOfHostCapacity' <<< "$ERROR_TEXT"; then
                 echo "[RETRY] $ad has no available capacity."
+              elif grep -Eqi 'too many requests|TooManyRequests|service unavailable|ServiceUnavailable|RequestException|connection .*timed out|read timed out|connect timeout|connection (reset|aborted|refused)|remote end closed|network is unreachable|temporary failure|name or service not known|could not resolve' <<< "$ERROR_TEXT"; then
+                echo "[RETRY] Transient OCI/network error in $ad."
+                echo "[INFO] $ERROR_TEXT"
               else
                 echo "[FATAL] OCI launch failed: $ERROR_TEXT"
                 exit "$RC"
