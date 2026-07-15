@@ -35,37 +35,40 @@ jobs:
           set -e
           export OCI_CLI_SUPPRESS_FILE_PERMISSIONS_WARNING=True
 
-          # 写入 OCI 配置文件
+          # ========== 环境变量诊断 ==========
+          echo "=== ENV DIAGNOSTICS ==="
+          echo "OCI_USER       len=${#OCI_USER}   ok=$([ -n \"${OCI_USER}\" ] && echo YES || echo NO)"
+          echo "OCI_TENANCY    len=${#OCI_TENANCY}   ok=$([ -n \"${OCI_TENANCY}\" ] && echo YES || echo NO)"
+          echo "OCI_FP         len=${#OCI_FP}   ok=$([ -n \"${OCI_FP}\" ] && echo YES || echo NO)"
+          echo "OCI_REGION     len=${#OCI_REGION}   ok=$([ -n \"${OCI_REGION}\" ] && echo YES || echo NO)"
+          echo "SUBNET_ID      len=${#SUBNET_ID}   ok=$([ -n \"${SUBNET_ID}\" ] && echo YES || echo NO)"
+          echo "========================"
+          if [ -z "${OCI_TENANCY}" ]; then
+            echo ""
+            echo "[FATAL] env OCI_TENANCY is empty!"
+            echo "[HINT]  Secret name mismatch. Check GitHub repo →"
+            echo "        Settings → Secrets → Actions for exact name."
+            echo "        Must be: TENANCY_OCID (all caps, underscore)"
+            exit 1
+          fi
+          if [ -z "${OCI_USER}" ]; then
+            echo "[FATAL] env OCI_USER is empty!"
+            exit 1
+          fi
+          echo ""
+
+          # 写入 OCI 配置文件（直接用 printf，不用 heredoc/sed）
           mkdir -p $HOME/.oci
-          cat > $HOME/.oci/config <<'OCICFG'
-          [DEFAULT]
-          user=PLACEHOLDER_USER
-          fingerprint=PLACEHOLDER_FP
-          tenancy=PLACEHOLDER_TENANCY
-          region=PLACEHOLDER_REGION
-          key_file=PLACEHOLDER_HOME/.oci/key.pem
-          OCICFG
-          sed -i "s|PLACEHOLDER_USER|${OCI_USER}|" $HOME/.oci/config
-          sed -i "s|PLACEHOLDER_FP|${OCI_FP}|" $HOME/.oci/config
-          sed -i "s|PLACEHOLDER_TENANCY|${OCI_TENCANCY}|" $HOME/.oci/config
-          sed -i "s|PLACEHOLDER_REGION|${OCI_REGION}|" $HOME/.oci/config
-          sed -i "s|PLACEHOLDER_HOME|${HOME}|" $HOME/.oci/config
+          printf '[DEFAULT]\nuser=%s\nfingerprint=%s\ntenancy=%s\nregion=%s\nkey_file=%s/.oci/key.pem\n' \
+            "${OCI_USER}" "${OCI_FP}" "${OCI_TENANCY}" "${OCI_REGION}" "${HOME}" \
+            > $HOME/.oci/config
           echo "${OCI_PRIVATE_KEY}" > $HOME/.oci/key.pem
           chmod 600 $HOME/.oci/key.pem $HOME/.oci/config
 
-          # 调试：打印配置文件内容
           echo "=== OCI Config File ==="
           grep -v "key_file" $HOME/.oci/config
-          echo "[tenancy length: $(echo -n "${OCI_TENCANCY}" | wc -c)]"
-          echo "[tenancy prefix: ${OCI_TENCANCY:0:16}]"
           echo "======================="
           echo ""
-
-          # 校验 tenancy 格式
-          case "${OCI_TENCANCY}" in
-            ocid1.tenancy.*) ;;
-            *) echo "[FATAL] TENANCY_OCID 不是合法的租户 OCID"; exit 1 ;;
-          esac
 
           # SSH
           mkdir -p $HOME/.ssh
