@@ -70,6 +70,16 @@ jobs:
           echo "======================="
           echo ""
 
+          # ========== OCID 字节级诊断 ==========
+          echo "=== OCID BYTES (first 60 hex) ==="
+          echo -n "${OCI_TENANCY}" | od -A x -t x1z | head -6
+          echo ""
+          echo "=== OCID VALIDATION: direct API call ==="
+          oci iam compartment get --compartment-id "${OCI_TENANCY}" 2>&1 || true
+          echo ""
+          echo "======================================="
+          echo ""
+
           # SSH
           mkdir -p $HOME/.ssh
           echo "${SSH_PUB_KEY}" > $HOME/.ssh/id_rsa_oracle.pub
