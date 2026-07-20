@@ -3,14 +3,14 @@ name: Oracle ARM Instance Sniper
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/30 * * * *'
 
 permissions:
   contents: read
 
 concurrency:
   group: oracle-arm-sniper-${{ github.repository }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   sniper:
