@@ -156,8 +156,8 @@ jobs:
                 --availability-domain "$ad" \
                 --compartment-id "$OCI_TENANCY" \
                 --shape 'VM.Standard.A1.Flex' \
-                --shape-config '{"ocpus":1,"memoryInGBs":6}' \
-                --boot-volume-size-in-gbs 50 \
+                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --boot-volume-size-in-gbs 100 \
                 --image-id "$IMAGE_ID" \
                 --subnet-id "$SUBNET_ID" \
                 --ssh-authorized-keys-file "$HOME/.ssh/id_rsa_oracle.pub" \
