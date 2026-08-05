@@ -198,5 +198,5 @@ jobs:
               sleep 5
             done
             echo '[RETRY] All availability domains failed; retrying in 30 seconds.'
-            sleep 30
+            sleep 120
           done
